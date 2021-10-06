@@ -126,7 +126,7 @@ var takeTests = []struct {
 
 func (rateLimitSuite) TestTake(c *gc.C) {
 	for i, test := range takeTests {
-		tb := New(test.fillInterval, test.capacity)
+		tb := NewBucket(test.fillInterval, test.capacity)
 		for j, req := range test.reqs {
 			d := tb.take(tb.startTime.Add(req.time), req.count)
 			if d != req.expectWait {
@@ -136,22 +136,22 @@ func (rateLimitSuite) TestTake(c *gc.C) {
 	}
 }
 
-type tryTakeReq struct {
+type takeAvailableReq struct {
 	time   time.Duration
 	count  int64
 	expect int64
 }
 
-var tryTakeTests = []struct {
+var takeAvailableTests = []struct {
 	about        string
 	fillInterval time.Duration
 	capacity     int64
-	reqs         []tryTakeReq
+	reqs         []takeAvailableReq
 }{{
 	about:        "serial requests",
 	fillInterval: 250 * time.Millisecond,
 	capacity:     10,
-	reqs: []tryTakeReq{{
+	reqs: []takeAvailableReq{{
 		time:   0,
 		count:  0,
 		expect: 0,
@@ -172,7 +172,7 @@ var tryTakeTests = []struct {
 	about:        "concurrent requests",
 	fillInterval: 250 * time.Millisecond,
 	capacity:     10,
-	reqs: []tryTakeReq{{
+	reqs: []takeAvailableReq{{
 		time:   0,
 		count:  5,
 		expect: 5,
@@ -193,7 +193,7 @@ var tryTakeTests = []struct {
 	about:        "more than capacity",
 	fillInterval: 1 * time.Millisecond,
 	capacity:     10,
-	reqs: []tryTakeReq{{
+	reqs: []takeAvailableReq{{
 		time:   0,
 		count:  10,
 		expect: 10,
@@ -206,7 +206,7 @@ var tryTakeTests = []struct {
 	about:        "within capacity",
 	fillInterval: 10 * time.Millisecond,
 	capacity:     5,
-	reqs: []tryTakeReq{{
+	reqs: []takeAvailableReq{{
 		time:   0,
 		count:  5,
 		expect: 5,
@@ -221,11 +221,11 @@ var tryTakeTests = []struct {
 	}},
 }}
 
-func (rateLimitSuite) TestTryTake(c *gc.C) {
-	for i, test := range tryTakeTests {
-		tb := New(test.fillInterval, test.capacity)
+func (rateLimitSuite) TestTakeAvailable(c *gc.C) {
+	for i, test := range takeAvailableTests {
+		tb := NewBucket(test.fillInterval, test.capacity)
 		for j, req := range test.reqs {
-			d := tb.tryTake(tb.startTime.Add(req.time), req.count)
+			d := tb.takeAvailable(tb.startTime.Add(req.time), req.count)
 			if d != req.expect {
 				c.Fatalf("test %d.%d, %s, got %v want %v", i, j, test.about, d, req.expect)
 			}
@@ -234,8 +234,76 @@ func (rateLimitSuite) TestTryTake(c *gc.C) {
 }
 
 func (rateLimitSuite) TestPanics(c *gc.C) {
-	c.Assert(func() { New(0, 1) }, gc.PanicMatches, "token bucket fill interval is not > 0")
-	c.Assert(func() { New(-2, 1) }, gc.PanicMatches, "token bucket fill interval is not > 0")
-	c.Assert(func() { New(1, 0) }, gc.PanicMatches, "token bucket capacity is not > 0")
-	c.Assert(func() { New(1, -2) }, gc.PanicMatches, "token bucket capacity is not > 0")
+	c.Assert(func() { NewBucket(0, 1) }, gc.PanicMatches, "token bucket fill interval is not > 0")
+	c.Assert(func() { NewBucket(-2, 1) }, gc.PanicMatches, "token bucket fill interval is not > 0")
+	c.Assert(func() { NewBucket(1, 0) }, gc.PanicMatches, "token bucket capacity is not > 0")
+	c.Assert(func() { NewBucket(1, -2) }, gc.PanicMatches, "token bucket capacity is not > 0")
+}
+
+func isCloseTo(x, y, tolerance float64) bool {
+	return abs(x-y)/y < tolerance
+}
+
+func (rateLimitSuite) TestRate(c *gc.C) {
+	tb := NewBucket(1, 1)
+	if !isCloseTo(tb.Rate(), 1e9, 0.00001) {
+		c.Fatalf("got %v want 1e9", tb.Rate())
+	}
+	tb = NewBucket(2*time.Second, 1)
+	if !isCloseTo(tb.Rate(), 0.5, 0.00001) {
+		c.Fatalf("got %v want 0.5", tb.Rate())
+	}
+	tb = newBucketWithQuantum(100*time.Millisecond, 1, 5)
+	if !isCloseTo(tb.Rate(), 50, 0.00001) {
+		c.Fatalf("got %v want 50", tb.Rate())
+	}
+}
+
+func checkRate(c *gc.C, rate float64) {
+	tb := NewBucketWithRate(rate, 1<<62)
+	if !isCloseTo(tb.Rate(), rate, rateMargin) {
+		c.Fatalf("got %g want %v", tb.Rate(), rate)
+	}
+	d := tb.take(tb.startTime, 1<<62)
+	c.Assert(d, gc.Equals, time.Duration(0))
+
+	// Check that the actual rate is as expected by
+	// asking for a not-quite multiple of the bucket's
+	// quantum and checking that the wait time
+	// correct.
+
+	d = tb.take(tb.startTime, tb.quantum*2-tb.quantum/2)
+	expectTime := 1e9 * float64(tb.quantum) * 2 / rate
+	if !isCloseTo(float64(d), expectTime, rateMargin) {
+		c.Fatalf("rate %g: got %g want %v", rate, float64(d), expectTime)
+	}
+}
+
+func (rateLimitSuite) TestNewWithRate(c *gc.C) {
+	if !testing.Short() {
+		for rate := float64(1); rate < 1e6; rate += 2 {
+			checkRate(c, rate)
+		}
+	}
+	for _, rate := range []float64{
+		1024 * 1024 * 1024,
+		1e-5,
+		0.9e-5,
+		0.5,
+		0.9,
+		0.9e8,
+		3e12,
+		4e18,
+	} {
+		checkRate(c, rate)
+		checkRate(c, rate/3)
+		checkRate(c, rate*1.3)
+	}
+}
+
+func BenchmarkWait(b *testing.B) {
+	tb := NewBucket(1, 16*1024)
+	for i := b.N - 1; i >= 0; i-- {
+		tb.Wait(1)
+	}
 }
