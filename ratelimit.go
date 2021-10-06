@@ -1,5 +1,6 @@
 // Copyright 2014 Canonical Ltd.
-// Licensed under the LGPLv3, see LICENCE file for details.
+// Licensed under the LGPLv3 with static-linking exception.
+// See LICENCE file for details.
 
 // The ratelimit package provides an efficient token bucket implementation.
 // See http://en.wikipedia.org/wiki/Token_bucket.
@@ -22,8 +23,10 @@ type Bucket struct {
 	// The mutex guards the fields following it.
 	mu sync.Mutex
 
-	// avail hold the number of available tokens
+	// avail holds the number of available tokens
 	// in the bucket, as of availTick ticks from startTime.
+	// It will be negative when there are consumers
+	// waiting for tokens.
 	avail     int64
 	availTick int64
 }
@@ -46,7 +49,7 @@ const rateMargin = 0.01
 // at high rates, the actual rate may be up to 1% different from the
 // specified rate.
 func NewBucketWithRate(rate float64, capacity int64) *Bucket {
-	for quantum := int64(1); quantum < 1<<62; quantum *= 2 {
+	for quantum := int64(1); quantum < 1<<50; quantum = nextQuantum(quantum) {
 		fillInterval := time.Duration(1e9 * float64(quantum) / rate)
 		if fillInterval <= 0 {
 			continue
@@ -57,6 +60,17 @@ func NewBucketWithRate(rate float64, capacity int64) *Bucket {
 		}
 	}
 	panic("cannot find suitable quantum for " + strconv.FormatFloat(rate, 'g', -1, 64))
+}
+
+// nextQuantum returns the next quantum to try after q.
+// We grow the quantum exponentially, but slowly, so we
+// get a good fit in the lower numbers.
+func nextQuantum(q int64) int64 {
+	q1 := q * 11 / 10
+	if q1 == q {
+		q1++
+	}
+	return q1
 }
 
 // newBucketWithQuantum is similar to NewBucket, but allows
@@ -90,6 +104,21 @@ func (tb *Bucket) Wait(count int64) {
 	}
 }
 
+// WaitMaxDuration is like Wait except that it will
+// only take tokens from the bucket if it needs to wait
+// for no greater than maxWait. It reports whether
+// any tokens have been removed from the bucket
+// If no tokens have been removed, it returns immediately.
+func (tb *Bucket) WaitMaxDuration(count int64, maxWait time.Duration) bool {
+	d, ok := tb.TakeMaxDuration(count, maxWait)
+	if d > 0 {
+		time.Sleep(d)
+	}
+	return ok
+}
+
+const infinityDuration time.Duration = 0x7fffffffffffffff
+
 // Take takes count tokens from the bucket without blocking. It returns
 // the time that the caller should wait until the tokens are actually
 // available.
@@ -97,7 +126,21 @@ func (tb *Bucket) Wait(count int64) {
 // Note that if the request is irrevocable - there is no way to return
 // tokens to the bucket once this method commits us to taking them.
 func (tb *Bucket) Take(count int64) time.Duration {
-	return tb.take(time.Now(), count)
+	d, _ := tb.take(time.Now(), count, infinityDuration)
+	return d
+}
+
+// TakeMaxDuration is like Take, except that
+// it will only take tokens from the bucket if the wait
+// time for the tokens is no greater than maxWait.
+//
+// If it would take longer than maxWait for the tokens
+// to become available, it does nothing and reports false,
+// otherwise it returns the time that the caller should
+// wait until the tokens are actually available, and reports
+// true.
+func (tb *Bucket) TakeMaxDuration(count int64, maxWait time.Duration) (time.Duration, bool) {
+	return tb.take(time.Now(), count, maxWait)
 }
 
 // TakeAvailable takes up to count immediately available tokens from the
@@ -134,24 +177,30 @@ func (tb *Bucket) Rate() float64 {
 
 // take is the internal version of Take - it takes the current time as
 // an argument to enable easy testing.
-func (tb *Bucket) take(now time.Time, count int64) time.Duration {
+func (tb *Bucket) take(now time.Time, count int64, maxWait time.Duration) (time.Duration, bool) {
 	if count <= 0 {
-		return 0
+		return 0, true
 	}
 	tb.mu.Lock()
 	defer tb.mu.Unlock()
 
 	currentTick := tb.adjust(now)
-	tb.avail -= count
-	if tb.avail >= 0 {
-		return 0
+	avail := tb.avail - count
+	if avail >= 0 {
+		tb.avail = avail
+		return 0, true
 	}
 	// Round up the missing tokens to the nearest multiple
 	// of quantum - the tokens won't be available until
 	// that tick.
-	endTick := currentTick + (-tb.avail+tb.quantum-1)/tb.quantum
+	endTick := currentTick + (-avail+tb.quantum-1)/tb.quantum
 	endTime := tb.startTime.Add(time.Duration(endTick) * tb.fillInterval)
-	return endTime.Sub(now)
+	waitTime := endTime.Sub(now)
+	if waitTime > maxWait {
+		return 0, false
+	}
+	tb.avail = avail
+	return waitTime, true
 }
 
 // adjust adjusts the current bucket capacity based on the current time.
