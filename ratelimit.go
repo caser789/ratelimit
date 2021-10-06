@@ -1,3 +1,6 @@
+// Copyright 2014 Canonical Ltd.
+// Licensed under the LGPLv3, see LICENCE file for details.
+
 // The ratelimit package provides an efficient token bucket implementation.
 // See http://en.wikipedia.org/wiki/Token_bucket.
 package ratelimit
@@ -25,7 +28,7 @@ type TokenBucket struct {
 // New returns a new token bucket that fills at the
 // rate of one token every fillInterval, up to the given
 // maximum capacity. Both arguments must be
-// positive.
+// positive. The bucket is initially full.
 func New(fillInterval time.Duration, capacity int64) *TokenBucket {
 	if fillInterval <= 0 {
 		panic("token bucket fill interval is not > 0")
@@ -36,6 +39,7 @@ func New(fillInterval time.Duration, capacity int64) *TokenBucket {
 	return &TokenBucket{
 		startTime:    time.Now(),
 		capacity:     capacity,
+		avail:        capacity,
 		fillInterval: fillInterval,
 	}
 }

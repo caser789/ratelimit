@@ -1,3 +1,6 @@
+// Copyright 2014 Canonical Ltd.
+// Licensed under the LGPLv3, see LICENCE file for details.
+
 package ratelimit
 
 import (
@@ -36,6 +39,10 @@ var rateLimitTests = []struct {
 		expectWait: 0,
 	}, {
 		time:       0,
+		count:      10,
+		expectWait: 0,
+	}, {
+		time:       0,
 		count:      1,
 		expectWait: 250 * time.Millisecond,
 	}, {
@@ -48,6 +55,10 @@ var rateLimitTests = []struct {
 	fillInterval: 250 * time.Millisecond,
 	capacity:     10,
 	reqs: []req{{
+		time:       0,
+		count:      10,
+		expectWait: 0,
+	}, {
 		time:       0,
 		count:      2,
 		expectWait: 500 * time.Millisecond,
@@ -65,6 +76,10 @@ var rateLimitTests = []struct {
 	fillInterval: 1 * time.Millisecond,
 	capacity:     10,
 	reqs: []req{{
+		time:       0,
+		count:      10,
+		expectWait: 0,
+	}, {
 		time:       20 * time.Millisecond,
 		count:      15,
 		expectWait: 5 * time.Millisecond,
@@ -74,6 +89,10 @@ var rateLimitTests = []struct {
 	fillInterval: 10 * time.Millisecond,
 	capacity:     10,
 	reqs: []req{{
+		time:       0,
+		count:      10,
+		expectWait: 0,
+	}, {
 		time:       7 * time.Millisecond,
 		count:      1,
 		expectWait: 3 * time.Millisecond,
@@ -87,6 +106,10 @@ var rateLimitTests = []struct {
 	fillInterval: 10 * time.Millisecond,
 	capacity:     5,
 	reqs: []req{{
+		time:       0,
+		count:      5,
+		expectWait: 0,
+	}, {
 		time:       60 * time.Millisecond,
 		count:      5,
 		expectWait: 0,
